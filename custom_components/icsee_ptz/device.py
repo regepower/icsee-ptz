@@ -33,6 +33,32 @@ __all__ = [
 ]
 
 
+def _alarm_keep_alive(
+    cam: DVRIPCam,
+) -> Callable[[asyncio.AbstractEventLoop], None]:
+    """Keepalive for the alarm link that does not wait for its reply.
+
+    The alarm worker holds the connection lock while it waits for the next
+    packet, so the stock keepalive (which waits for its reply under that lock)
+    is never sent and the camera drops the session after ~40s. Send it without
+    waiting instead; the alarm worker reads the reply and ignores it.
+    """
+
+    async def worker() -> None:
+        while cam.socket_writer:
+            # wait first: the AlarmSet right after login must get its own reply
+            await asyncio.sleep(cam.alive_time)
+            if not cam.socket_writer:
+                break
+            await cam._send_locked(  # noqa: SLF001 - no lock: see above
+                cam.QCODES["KeepAlive"],
+                {"Name": "KeepAlive", "SessionID": "0x%08X" % cam.session},
+                wait_response=False,
+            )
+
+    return lambda loop: loop.create_task(worker())
+
+
 class CannotConnect(Exception):
     """The device can't be reached."""
 
@@ -152,6 +178,9 @@ class ICSeeDevice:
         dvrip = self._new_cam()
         dvrip_alarm = self._new_cam()
         dvrip_ptz = self._new_cam()
+        if self.battery:
+            # we do not re-login every 20s here, so the alarm link must stay up
+            dvrip_alarm.keep_alive = _alarm_keep_alive(dvrip_alarm)
         try:
             await self._login(dvrip)
             await self._login(dvrip_alarm)
