@@ -13,9 +13,10 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import HomeAssistantError
 from homeassistant.helpers import issue_registry as ir
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
 
-from .const import DOMAIN, RET_NEEDS_REBOOT, SCAN_INTERVAL
+from .const import CONF_BATTERY, DOMAIN, RET_NEEDS_REBOOT, SCAN_INTERVAL
 from .device import (
     AuthFailed,
     CannotConnect,
@@ -37,6 +38,11 @@ _LOGGER = logging.getLogger(__name__)
 # fallback stream until a restart. Instead, keep retrying such a config on the next
 # few polls, then give up so a genuinely silent config does not waste CPU/network.
 RETRY_BUDGET = 3
+
+# Battery cameras are asleep most of the time, also when Home Assistant starts.
+# Keep what we read on disk so the entities can be set up without the camera.
+CACHE_VERSION = 1
+CACHE_SAVE_DELAY = 10  # seconds
 
 
 class NoAnswer(Exception):
@@ -148,9 +154,26 @@ class ICSeeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self._retry: dict[str, int] = (
             {}
         )  # configs that have not answered yet -> tries left
+        self.battery: bool = entry.options.get(CONF_BATTERY, False)
+        self._store: Store[dict[str, Any]] = Store(
+            hass, CACHE_VERSION, f"{DOMAIN}.{entry.entry_id}"
+        )
+        self._cached_data: dict[str, Any] | None = None
 
     async def _async_setup(self) -> None:
         """Read the device info and abilities once."""
+        if self.battery and not self.device.is_connected:
+            # asleep: start from what we read the last time it was awake
+            cache = await self._store.async_load()
+            if not cache:
+                raise UpdateFailed(
+                    translation_domain=DOMAIN, translation_key="cannot_connect"
+                )
+            self.system_info = cache.get("system_info") or {}
+            self.abilities = cache.get("abilities") or {}
+            self.supported = set(cache.get("supported") or ())
+            self._cached_data = cache.get("data") or {}
+            return
         try:
             self.system_info = await self.device.async_get_system_info() or {}
             for name in ABILITIES:
@@ -186,7 +209,16 @@ class ICSeeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         raise NoAnswer(name)
 
     async def _async_update_data(self) -> dict[str, Any]:
-        data = dict(self.data or {})
+        if self.battery and not self.device.is_connected:
+            # asleep: keep the last known values instead of going unavailable
+            if self.data is not None:
+                return self.data
+            if self._cached_data is not None:
+                return self._cached_data
+            raise UpdateFailed(
+                translation_domain=DOMAIN, translation_key="cannot_connect"
+            )
+        data = dict(self.data or self._cached_data or {})
         first = self.supported is None
         rediscover = first or self._force_full  # startup or the Refresh button
         self._force_full = False
@@ -224,11 +256,26 @@ class ICSeeCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             self._retry.pop(name, None)
                     # a config we have seen before keeps its last known value
         except (CannotConnect, AuthFailed) as err:
+            if self.battery and data and not isinstance(err, AuthFailed):
+                # fell asleep while we were reading: keep what we have
+                _LOGGER.debug("Camera fell asleep during the poll: %s", err)
+                self.supported = supported
+                return data
             raise UpdateFailed(
                 translation_domain=DOMAIN, translation_key="cannot_connect"
             ) from err
         self.supported = supported
+        if self.battery:
+            self._store.async_delay_save(self._cache, CACHE_SAVE_DELAY)
         return data
+
+    def _cache(self) -> dict[str, Any]:
+        return {
+            "system_info": self.system_info,
+            "abilities": self.abilities,
+            "supported": sorted(self.supported or ()),
+            "data": self.data,
+        }
 
     async def async_refresh_all(self) -> None:
         """Re-read every setting once now (the Refresh settings button)."""

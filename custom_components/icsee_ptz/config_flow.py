@@ -38,6 +38,7 @@ from homeassistant.helpers.selector import (
 
 from .const import (
     CONF_ADD_PTZ_BUTTONS_ALL_CHANNELS,
+    CONF_BATTERY,
     CONF_CHANNEL,
     CONF_CHANNEL_COUNT,
     CONF_PRESET,
@@ -345,6 +346,9 @@ class OptionsFlowHandler(OptionsFlow):
                     vol.Optional(
                         CONF_ADD_PTZ_BUTTONS_ALL_CHANNELS,
                         default=options.get(CONF_ADD_PTZ_BUTTONS_ALL_CHANNELS, False),
+                    ): cv.boolean,
+                    vol.Optional(
+                        CONF_BATTERY, default=options.get(CONF_BATTERY, False)
                     ): cv.boolean,
                 }
             ),

@@ -17,6 +17,12 @@ from .asyncio_dvrip import (
 _LOGGER = logging.getLogger(__name__)
 
 RECONNECT_INTERVAL = 20  # seconds; the camera keepalive is unreliable, so we re-login
+# Battery cameras: re-logging in every 20s keeps them awake and drains the
+# battery. Instead check with a bare TCP connect (no login) whether the camera
+# is awake, and only log in when it is.
+PROBE_INTERVAL = 5  # seconds
+PROBE_TIMEOUT = 3  # seconds
+MISSED_PROBES_ASLEEP = 2  # failed probes in a row before we call it asleep
 
 __all__ = [
     "AuthFailed",
@@ -38,11 +44,20 @@ class AuthFailed(Exception):
 class ICSeeDevice:
     """Keeps a command connection and an alarm connection alive."""
 
-    def __init__(self, host: str, port: int, username: str, password: str) -> None:
+    def __init__(
+        self,
+        host: str,
+        port: int,
+        username: str,
+        password: str,
+        battery: bool = False,
+    ) -> None:
         self.host = host
         self.port = port
         self.username = username
         self.password = password
+        self.battery = battery
+        self._missed_probes = 0
         self.dvrip: DVRIPCam | None = None
         self.dvrip_alarm: DVRIPCam | None = None
         self.dvrip_ptz: DVRIPCam | None = None  # PTZ on its own link, never waits
@@ -190,31 +205,64 @@ class ICSeeDevice:
         """Keep reconnecting. Runs as a background task until cancelled."""
         try:
             while True:
-                await asyncio.sleep(RECONNECT_INTERVAL)
-                try:
-                    await self.async_connect()
-                except AuthFailed:
-                    _LOGGER.warning("%s: login rejected", self.host)
-                    self.auth_failed = True
-                    self._set_connected(False)
-                except CannotConnect as err:
-                    _LOGGER.debug("%s: cannot connect: %s", self.host, err)
-                    self._set_connected(False)
-                except (
-                    Exception
-                ):  # never let the loop die, or the camera stays dead until reload
-                    _LOGGER.exception(
-                        "Unexpected error talking to camera %s", self.host
-                    )
-                    self._set_connected(False)
+                if self.battery:
+                    await asyncio.sleep(PROBE_INTERVAL)
+                    await self._battery_step()
+                else:
+                    await asyncio.sleep(RECONNECT_INTERVAL)
+                    await self._reconnect()
         finally:
             self.close()
 
-    def close(self) -> None:
+    async def _reconnect(self) -> None:
+        try:
+            await self.async_connect()
+        except AuthFailed:
+            _LOGGER.warning("%s: login rejected", self.host)
+            self.auth_failed = True
+            self._set_connected(False)
+        except CannotConnect as err:
+            _LOGGER.debug("%s: cannot connect: %s", self.host, err)
+            self._set_connected(False)
+        except Exception:  # never let the loop die, or the camera stays dead
+            _LOGGER.exception("Unexpected error talking to camera %s", self.host)
+            self._set_connected(False)
+
+    async def _battery_step(self) -> None:
+        """Stay connected while the camera is awake, wait quietly while it sleeps."""
+        if await self.async_probe():
+            self._missed_probes = 0
+            if not self.is_connected:  # just woke up, or the alarm link dropped
+                _LOGGER.debug("%s: awake, connecting", self.host)
+                await self._reconnect()
+            return
+        self._missed_probes += 1
+        if self.connected and self._missed_probes >= MISSED_PROBES_ASLEEP:
+            # A sleeping camera drops off without closing the connection, so the
+            # sockets would only notice after minutes. Close them ourselves.
+            _LOGGER.debug("%s: asleep", self.host)
+            self._close_links()
+            self._set_connected(False)
+
+    async def async_probe(self) -> bool:
+        """True if the camera accepts a TCP connection (no login, cheap)."""
+        try:
+            _reader, writer = await asyncio.wait_for(
+                asyncio.open_connection(self.host, self.port), PROBE_TIMEOUT
+            )
+        except (OSError, TimeoutError):
+            return False
+        writer.close()
+        return True
+
+    def _close_links(self) -> None:
         for cam in (self.dvrip, self.dvrip_alarm, self.dvrip_ptz):
             if cam:
                 cam.close()
         self.dvrip = self.dvrip_alarm = self.dvrip_ptz = None
+
+    def close(self) -> None:
+        self._close_links()
         self.connected = False
 
     async def _safe(self, coro) -> None:

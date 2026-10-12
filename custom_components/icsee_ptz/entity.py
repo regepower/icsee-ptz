@@ -53,7 +53,9 @@ class ICSeeEntity(CoordinatorEntity[ICSeeCoordinator]):
 
     @property
     def available(self) -> bool:
-        return super().available and self.device.is_connected
+        # a sleeping battery camera keeps showing its last known values
+        connected = self.device.is_connected or self.coordinator.battery
+        return super().available and connected
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()

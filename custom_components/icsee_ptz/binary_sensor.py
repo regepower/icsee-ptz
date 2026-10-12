@@ -42,6 +42,8 @@ async def async_setup_entry(
         MotionAlarm(coordinator, channel)
         for channel in range(entry.data.get(CONF_CHANNEL_COUNT, 1))
     )
+    if coordinator.battery:
+        async_add_entities([CameraAwake(coordinator)])
     async_add_entities(
         config_entities(coordinator, CONFIG_SENSORS, ICSeeConfigBinarySensor)
     )
@@ -129,9 +131,13 @@ class MotionAlarm(ICSeeEntity, BinarySensorEntity):
         # Only trust a polled "off" once the camera has shown a polled "on".
         self._poll_reports_motion = False
         self._attr_is_on = self._polled()
+        if self._attr_is_on is None and coordinator.battery:
+            self._attr_is_on = False  # asleep: no motion
 
     def _polled(self) -> bool | None:
         """Current alarm state from WorkState (one bit per channel)."""
+        if self.coordinator.battery and not self.device.is_connected:
+            return None  # the cached WorkState of a sleeping camera is stale
         state = (self.coordinator.channel_value("WorkState", 0) or {}).get("AlarmState")
         if not isinstance(state, dict) or state.get("VideoMotion") is None:
             return None
@@ -162,12 +168,21 @@ class MotionAlarm(ICSeeEntity, BinarySensorEntity):
 
     @property
     def available(self) -> bool:
-        # Pushed by the camera; does not depend on the config polling
-        return self.device.is_connected
+        # Pushed by the camera; does not depend on the config polling.
+        # A sleeping battery camera sees no motion, so it stays available (off).
+        return self.device.is_connected or self.coordinator.battery
 
     async def async_added_to_hass(self) -> None:
         await super().async_added_to_hass()
         self.async_on_remove(self.device.add_alarm_callback(self._on_alarm))
+        self.async_on_remove(self.device.add_connection_callback(self._on_connection))
+
+    @callback
+    def _on_connection(self) -> None:
+        if not self.device.connected and self._attr_is_on:
+            # the camera fell asleep or dropped off before "motion ended"
+            self._attr_is_on = False
+            self.async_write_ha_state()
 
     @callback
     def _on_alarm(self, what: dict[str, Any]) -> None:
@@ -192,6 +207,25 @@ class MotionAlarm(ICSeeEntity, BinarySensorEntity):
 
     async def async_force_frame(self) -> None:
         await _run(self.device.async_force_frame())
+
+
+class CameraAwake(ICSeeEntity, BinarySensorEntity):
+    """On while a battery camera is awake and connected."""
+
+    _attr_device_class = BinarySensorDeviceClass.CONNECTIVITY
+    _attr_entity_category = EntityCategory.DIAGNOSTIC
+    _attr_translation_key = "awake"
+
+    def __init__(self, coordinator: ICSeeCoordinator) -> None:
+        super().__init__(coordinator, "awake")
+
+    @property
+    def available(self) -> bool:
+        return True
+
+    @property
+    def is_on(self) -> bool:
+        return self.device.is_connected
 
 
 async def _run(coro: Any) -> None:

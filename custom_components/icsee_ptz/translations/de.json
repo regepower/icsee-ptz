@@ -79,12 +79,13 @@
     "step": {
       "init": {
         "title": "PTZ-Standardwerte",
-        "description": "Standardwerte für PTZ. Schritt bedeutet Geschwindigkeit. Preset wird nur von SetPreset/GotoPreset/ClearPreset verwendet. Der Kanal ist meist 0. Standardmäßig werden PTZ-Tasten nur für diesen Kanal erstellt.",
+        "description": "Standardwerte für PTZ. Schritt bedeutet Geschwindigkeit. Preset wird nur von SetPreset/GotoPreset/ClearPreset verwendet. Der Kanal ist meist 0. Standardmäßig werden PTZ-Tasten nur für diesen Kanal erstellt. Der Akku-Modus ist für Akku- oder Solarkameras, die schlafen: Die zuletzt bekannten Werte bleiben im Schlaf verfügbar, und die Kamera wird verbunden, sobald sie aufwacht.",
         "data": {
           "channel": "Kanal",
           "step": "Schritt",
           "preset": "Preset",
-          "add_ptz_buttons_all_channels": "PTZ-Tasten für alle Kanäle hinzufügen"
+          "add_ptz_buttons_all_channels": "PTZ-Tasten für alle Kanäle hinzufügen",
+          "battery_camera": "Akku-/Solarkamera (schläft die meiste Zeit)"
         }
       }
     }
@@ -100,6 +101,9 @@
     "binary_sensor": {
       "motion_alarm": {
         "name": "Bewegungsalarm"
+      },
+      "awake": {
+        "name": "Wach"
       },
       "password_reset_questions": {
         "name": "Passwort-Reset: per Sicherheitsfragen"

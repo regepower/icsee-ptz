@@ -29,10 +29,16 @@ from homeassistant.helpers import (
     service,
 )
 from homeassistant.helpers.event import async_track_time_interval
+from homeassistant.helpers.storage import Store
 from homeassistant.helpers.typing import ConfigType
 
-from .const import DEFAULT_PORT, DISCOVERY_INTERVAL, DOMAIN
-from .coordinator import ICSeeConfigEntry, ICSeeCoordinator, ICSeeData
+from .const import CONF_BATTERY, DEFAULT_PORT, DISCOVERY_INTERVAL, DOMAIN
+from .coordinator import (
+    CACHE_VERSION,
+    ICSeeConfigEntry,
+    ICSeeCoordinator,
+    ICSeeData,
+)
 from .device import AuthFailed, CannotConnect, ICSeeDevice
 from .discovery import async_discover
 
@@ -142,6 +148,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ICSeeConfigEntry) -> boo
         entry.data.get(CONF_PORT, DEFAULT_PORT),
         entry.data[CONF_USERNAME],
         entry.data[CONF_PASSWORD],
+        battery=entry.options.get(CONF_BATTERY, False),
     )
     try:
         await device.async_connect()
@@ -150,9 +157,12 @@ async def async_setup_entry(hass: HomeAssistant, entry: ICSeeConfigEntry) -> boo
             translation_domain=DOMAIN, translation_key="invalid_auth"
         ) from err
     except CannotConnect as err:
-        raise ConfigEntryNotReady(
-            translation_domain=DOMAIN, translation_key="cannot_connect"
-        ) from err
+        if not device.battery:
+            raise ConfigEntryNotReady(
+                translation_domain=DOMAIN, translation_key="cannot_connect"
+            ) from err
+        # a sleeping battery camera: set up from the cache, connect when it wakes
+        _LOGGER.debug("%s is asleep, starting from the cache", entry.title)
 
     coordinator = ICSeeCoordinator(hass, entry, device)
     try:
@@ -173,6 +183,11 @@ async def async_setup_entry(hass: HomeAssistant, entry: ICSeeConfigEntry) -> boo
         if device.connected:
             # reconnected, e.g. after the camera restarted: settings are applied now
             ir.async_delete_issue(hass, DOMAIN, f"reboot_required_{entry.entry_id}")
+            if device.battery:
+                # it is only awake for a short while: read the live values now
+                entry.async_create_background_task(
+                    hass, coordinator.async_request_refresh(), f"{DOMAIN} wake-up"
+                )
 
     entry.async_on_unload(device.add_connection_callback(_check_connection))
     entry.async_on_unload(entry.add_update_listener(_async_reload))
@@ -185,6 +200,11 @@ async def async_unload_entry(hass: HomeAssistant, entry: ICSeeConfigEntry) -> bo
     if unloaded:
         entry.runtime_data.device.close()
     return unloaded
+
+
+async def async_remove_entry(hass: HomeAssistant, entry: ICSeeConfigEntry) -> None:
+    """Delete the battery camera cache."""
+    await Store(hass, CACHE_VERSION, f"{DOMAIN}.{entry.entry_id}").async_remove()
 
 
 async def _async_reload(hass: HomeAssistant, entry: ICSeeConfigEntry) -> None:

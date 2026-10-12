@@ -10,6 +10,9 @@ CONF_PRESET = "preset"
 CONF_ADD_PTZ_BUTTONS_ALL_CHANNELS = "add_ptz_buttons_all_channels"
 CONF_CHANNEL_COUNT = "channel_count"
 CONF_SYSTEM_CAPABILITIES = "system_capabilities"
+# Battery / solar cameras sleep most of the time: keep the last known values
+# while asleep and reconnect as soon as the camera wakes up
+CONF_BATTERY = "battery_camera"
 # Legacy option (<= 4.x): gated the old experimental entities. Ignored now.
 CONF_EXPERIMENTAL_ENTITIES = "experimental_entities"
 
